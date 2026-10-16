@@ -363,6 +363,7 @@ function HomeContent() {
         {/* 首页推荐（有搜索时隐藏） */}
         {!urlQuery && (
           <HomePortal
+            onOpen={(item) => setDetailItem(item)}
             onPick={(title) => {
               setInput(title);
               runSearch(title);
