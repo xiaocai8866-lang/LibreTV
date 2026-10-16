@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
+import { useQuery } from '@tanstack/react-query';
 import { api } from '@/lib/client-api';
 import { useAppStore } from '@/lib/store';
 import { cn } from '@/lib/utils';
@@ -375,8 +375,24 @@ function ArrowButton({ side, onClick }: { side: 'left' | 'right'; onClick: () =>
   );
 }
 
+const THIS_YEAR = new Date().getFullYear();
+/** 常用年份做成按钮，更早的放进下拉框 */
+const YEAR_CHIPS = Array.from({ length: 10 }, (_, i) => String(THIS_YEAR - i));
+const YEAR_OLDER = Array.from({ length: THIS_YEAR - 10 - 1979 }, (_, i) => String(THIS_YEAR - 10 - i));
+const PAGE_SIZES = [20, 40, 60];
+const PAGE_SIZE_KEY = 'libretv:catalog-page-size';
+
+function readPageSize(): number {
+  try {
+    const n = Number(localStorage.getItem(PAGE_SIZE_KEY));
+    return PAGE_SIZES.includes(n) ? n : 40;
+  } catch {
+    return 40;
+  }
+}
+
 /**
- * 分类页：子分类筛选 + 无限滚动网格。
+ * 分类页：类型 + 年份筛选，分页浏览。
  * 一级分类本身有足量影片（如短剧）时额外提供「全部」；否则默认第一个子分类。
  */
 function CategoryGrid({ parent, subs, onOpen }: { parent: CatalogClass; subs: CatalogClass[]; onOpen: (item: SearchResultItem) => void }) {
@@ -388,81 +404,190 @@ function CategoryGrid({ parent, subs, onOpen }: { parent: CatalogClass; subs: Ca
   const parentHasMany = (parentProbe.data?.total ?? 0) >= 100 || subs.length === 0;
   const chips = parentHasMany ? [{ ...parent, name: '全部' }, ...subs] : subs;
   const [picked, setPicked] = useState<string | null>(null);
+  const [year, setYear] = useState('');
+  const [size, setSize] = useState(40);
+  const [page, setPage] = useState(1);
   const t = picked ?? (parentProbe.isLoading && subs.length > 0 ? null : chips[0]?.id ?? null);
+  const topRef = useRef<HTMLElement>(null);
+
+  useEffect(() => setSize(readPageSize()), []);
+
+  const goPage = (p: number) => {
+    setPage(p);
+    topRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
 
   return (
-    <section>
-      {chips.length > 1 && (
-        <div className="flex flex-wrap gap-2 mb-5">
-          {chips.map((c) => (
-            <button
-              key={c.id}
-              onClick={() => setPicked(c.id)}
-              className={cn(
-                'px-3 py-1 rounded-full text-sm transition-colors',
-                c.id === t ? 'bg-accent text-on-accent' : 'bg-chip text-muted hover:text-content hover:bg-hover'
-              )}
-            >
-              {c.name}
-            </button>
+    <section ref={topRef} className="scroll-mt-20">
+      <div className="space-y-3 mb-5">
+        {chips.length > 1 && (
+          <FilterLine label="类型">
+            {chips.map((c) => (
+              <FilterChip key={c.id} active={c.id === t} onClick={() => { setPicked(c.id); setPage(1); }}>
+                {c.name}
+              </FilterChip>
+            ))}
+          </FilterLine>
+        )}
+        <FilterLine label="年份">
+          <FilterChip active={!year} onClick={() => { setYear(''); setPage(1); }}>全部</FilterChip>
+          {YEAR_CHIPS.map((y) => (
+            <FilterChip key={y} active={year === y} onClick={() => { setYear(y); setPage(1); }}>{y}</FilterChip>
           ))}
-        </div>
+          <select
+            aria-label="更早年份"
+            value={YEAR_OLDER.includes(year) ? year : ''}
+            onChange={(e) => { setYear(e.target.value); setPage(1); }}
+            className={cn(
+              'px-2 py-1 rounded-full text-sm bg-chip border-0 cursor-pointer',
+              YEAR_OLDER.includes(year) ? 'bg-accent text-on-accent' : 'text-muted'
+            )}
+          >
+            <option value="">更早</option>
+            {YEAR_OLDER.map((y) => <option key={y} value={y}>{y}</option>)}
+          </select>
+        </FilterLine>
+      </div>
+      {t ? (
+        <PagedGrid
+          t={t}
+          year={year}
+          size={size}
+          page={page}
+          onPage={goPage}
+          onSize={(n) => {
+            setSize(n);
+            setPage(1);
+            try { localStorage.setItem(PAGE_SIZE_KEY, String(n)); } catch { /* 隐私模式 */ }
+          }}
+          onOpen={onOpen}
+        />
+      ) : (
+        <GridSkeleton />
       )}
-      {t ? <InfiniteGrid key={t} t={t} onOpen={onOpen} /> : <GridSkeleton />}
     </section>
+  );
+}
+
+function FilterLine({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="flex items-start gap-3">
+      <span className="shrink-0 w-10 pt-1 text-sm text-faint">{label}</span>
+      <div className="flex flex-wrap gap-2">{children}</div>
+    </div>
+  );
+}
+
+function FilterChip({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }) {
+  return (
+    <button
+      onClick={onClick}
+      className={cn(
+        'px-3 py-1 rounded-full text-sm transition-colors',
+        active ? 'bg-accent text-on-accent' : 'bg-chip text-muted hover:text-content hover:bg-hover'
+      )}
+    >
+      {children}
+    </button>
   );
 }
 
 const GRID = 'grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-7 gap-4';
 
-function InfiniteGrid({ t, onOpen }: { t: string; onOpen: (item: SearchResultItem) => void }) {
-  const query = useInfiniteQuery({
-    queryKey: ['catalog-infinite', t],
-    queryFn: ({ pageParam, signal }) => api.catalog({ t, pg: pageParam }, signal),
-    initialPageParam: 1,
-    getNextPageParam: (last) => (last.page < last.pagecount ? last.page + 1 : undefined),
+function PagedGrid({
+  t, year, size, page, onPage, onSize, onOpen,
+}: {
+  t: string; year: string; size: number; page: number;
+  onPage: (p: number) => void; onSize: (n: number) => void; onOpen: (item: SearchResultItem) => void;
+}) {
+  const query = useQuery({
+    queryKey: ['catalog-paged', t, year, size, page],
+    queryFn: ({ signal }) => api.catalog({ t, pg: page, year, size }, signal),
     staleTime: 5 * 60_000,
+    placeholderData: (prev) => prev,
   });
-  const sentinel = useRef<HTMLDivElement>(null);
-  const { hasNextPage, isFetchingNextPage, fetchNextPage } = query;
-
-  useEffect(() => {
-    const el = sentinel.current;
-    if (!el) return;
-    const io = new IntersectionObserver(
-      (entries) => {
-        if (entries[0].isIntersecting && hasNextPage && !isFetchingNextPage) fetchNextPage();
-      },
-      { rootMargin: '600px' }
-    );
-    io.observe(el);
-    return () => io.disconnect();
-  }, [hasNextPage, isFetchingNextPage, fetchNextPage]);
-
-  if (query.isError) return <p className="text-center text-sm text-faint py-12">片库加载失败，请稍后重试</p>;
-  if (query.isLoading) return <GridSkeleton />;
-
-  const seen = new Set<string>();
-  const items = (query.data?.pages ?? []).flatMap((p) => p.list).filter((it) => {
-    const k = `${it.sourceKey}_${it.vodId}`;
-    if (seen.has(k)) return false;
-    seen.add(k);
-    return true;
-  });
-  const total = query.data?.pages[0]?.total ?? 0;
+  const data = query.data;
+  const pagecount = data?.pagecount ?? 1;
+  const total = data?.total ?? 0;
 
   return (
     <>
-      <p className="text-sm text-faint mb-3">共 {total.toLocaleString()} 部</p>
-      <div className={GRID}>
-        {items.map((item) => (
-          <CatalogCard key={`${item.sourceKey}_${item.vodId}`} item={item} onOpen={onOpen} />
-        ))}
+      <div className="flex items-center justify-between mb-3 text-sm text-faint">
+        <span>
+          共 {total.toLocaleString()} 部 · 第 {page} / {pagecount} 页
+          {query.isFetching && data && <span className="ml-2">加载中…</span>}
+        </span>
+        <label className="flex items-center gap-1.5">
+          每页
+          <select value={size} onChange={(e) => onSize(Number(e.target.value))} className="px-2 py-1 rounded-md bg-chip text-content border-0 cursor-pointer">
+            {PAGE_SIZES.map((n) => <option key={n} value={n}>{n} 部</option>)}
+          </select>
+        </label>
       </div>
-      <div ref={sentinel} className="py-8 text-center text-sm text-faint">
-        {isFetchingNextPage ? '加载中…' : hasNextPage ? '' : '已经到底了'}
-      </div>
+
+      {query.isError && !data ? (
+        <p className="text-center text-sm text-faint py-12">片库加载失败，请稍后重试</p>
+      ) : !data ? (
+        <GridSkeleton />
+      ) : data.list.length === 0 ? (
+        <p className="text-center text-sm text-faint py-12">这个筛选条件下没有影片，换个年份试试</p>
+      ) : (
+        <div className={cn(GRID, query.isFetching && 'opacity-60 transition-opacity')}>
+          {data.list.map((item) => (
+            <CatalogCard key={`${item.sourceKey}_${item.vodId}`} item={item} onOpen={onOpen} />
+          ))}
+        </div>
+      )}
+
+      {pagecount > 1 && <Pagination page={page} pagecount={pagecount} onPage={onPage} />}
     </>
+  );
+}
+
+/** 页码条：首尾页 + 当前页前后两页，中间省略；右侧可直接跳页 */
+function Pagination({ page, pagecount, onPage }: { page: number; pagecount: number; onPage: (p: number) => void }) {
+  const [jump, setJump] = useState('');
+  const nums = new Set([1, pagecount]);
+  for (let p = page - 2; p <= page + 2; p++) if (p >= 1 && p <= pagecount) nums.add(p);
+  const sorted = [...nums].sort((a, b) => a - b);
+  const btn = 'min-w-9 h-9 px-3 rounded-lg text-sm transition-colors disabled:opacity-40 disabled:cursor-not-allowed';
+
+  return (
+    <nav aria-label="分页" className="flex flex-wrap items-center justify-center gap-1.5 py-8">
+      <button className={cn(btn, 'bg-chip text-muted hover:text-content')} disabled={page <= 1} onClick={() => onPage(page - 1)}>‹ 上一页</button>
+      {sorted.map((p, i) => (
+        <span key={p} className="flex items-center gap-1.5">
+          {i > 0 && p - sorted[i - 1] > 1 && <span className="px-1 text-faint">…</span>}
+          <button
+            className={cn(btn, p === page ? 'bg-accent text-on-accent font-medium' : 'bg-chip text-muted hover:text-content')}
+            onClick={() => onPage(p)}
+            aria-current={p === page ? 'page' : undefined}
+          >
+            {p}
+          </button>
+        </span>
+      ))}
+      <button className={cn(btn, 'bg-chip text-muted hover:text-content')} disabled={page >= pagecount} onClick={() => onPage(page + 1)}>下一页 ›</button>
+      <form
+        className="flex items-center gap-1.5 ml-3 text-sm text-faint"
+        onSubmit={(e) => {
+          e.preventDefault();
+          const n = parseInt(jump, 10);
+          if (n >= 1 && n <= pagecount) onPage(n);
+          setJump('');
+        }}
+      >
+        跳到
+        <input
+          value={jump}
+          onChange={(e) => setJump(e.target.value.replace(/\D/g, ''))}
+          inputMode="numeric"
+          aria-label="跳转页码"
+          className="w-14 h-9 px-2 rounded-lg bg-chip text-content text-center"
+        />
+        页
+      </form>
+    </nav>
   );
 }
 

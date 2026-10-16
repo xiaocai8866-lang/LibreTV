@@ -61,24 +61,35 @@ export async function GET(req: Request) {
     const t = (sp.get('t') || '').replace(/\D/g, '');
     const pg = Math.min(1000, Math.max(1, parseInt(sp.get('pg') || '1', 10) || 1));
     const h = (sp.get('h') || '').replace(/\D/g, '');
-    const key = `catalog:${base}:${t}:${pg}:${h}`;
+    const year = (sp.get('year') || '').replace(/\D/g, '').slice(0, 4);
+    // 源站每页固定 20 条：size 取 20 的倍数（最多 60），一页由多个源站页拼成
+    const per = Math.min(3, Math.max(1, Math.round((parseInt(sp.get('size') || '20', 10) || 20) / 20)));
+    const key = `catalog:${base}:${t}:${pg}:${h}:${year}:${per}`;
     const cached = getCache<unknown>(key);
     if (cached) return NextResponse.json(cached);
 
-    const qs = new URLSearchParams({ ac: 'videolist', pg: String(pg) });
-    if (t) qs.set('t', t);
-    if (h) qs.set('h', h);
-    const res = await fetchUpstream(`${base}?${qs}`, { timeoutMs: 8000, headers: cmsRequestHeaders() });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = (await res.json()) as { pagecount?: unknown; total?: unknown };
-    const list = filterAdultResults(parseSearchList(data, source), true).filter(
-      (item) => !EXCLUDED_CLASS.test(item.typeName || '')
+    const fetchPage = async (page: number) => {
+      const qs = new URLSearchParams({ ac: 'videolist', pg: String(page) });
+      if (t) qs.set('t', t);
+      if (h) qs.set('h', h);
+      if (year) qs.set('year', year);
+      const res = await fetchUpstream(`${base}?${qs}`, { timeoutMs: 8000, headers: cmsRequestHeaders() });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return (await res.json()) as { total?: unknown };
+    };
+    const first = (pg - 1) * per + 1;
+    const pages = await Promise.all(
+      Array.from({ length: per }, (_, i) => fetchPage(first + i).catch((err) => (i === 0 ? Promise.reject(err) : null)))
     );
+    const total = parseInt(String(pages[0]?.total ?? '0'), 10) || 0;
+    const list = pages
+      .flatMap((data) => (data ? parseSearchList(data, source) : []))
+      .filter((item) => !EXCLUDED_CLASS.test(item.typeName || ''));
     const payload = {
-      list,
+      list: filterAdultResults(list, true),
       page: pg,
-      pagecount: parseInt(String(data.pagecount ?? '1'), 10) || 1,
-      total: parseInt(String(data.total ?? '0'), 10) || 0,
+      pagecount: Math.max(1, Math.ceil(total / (per * 20))),
+      total,
     };
     setCache(key, payload, CATALOG_CACHE_TTL);
     return NextResponse.json(payload);

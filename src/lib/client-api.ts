@@ -180,10 +180,12 @@ export const api = {
     ),
 
   /** 片库分页：t=分类 id（空为全部），h=最近 N 小时更新 */
-  catalog: (params: { t?: string; pg?: number; h?: number }, signal?: AbortSignal) => {
+  catalog: (params: { t?: string; pg?: number; h?: number; year?: string; size?: number }, signal?: AbortSignal) => {
     const sp = new URLSearchParams({ pg: String(params.pg ?? 1) });
     if (params.t) sp.set('t', params.t);
     if (params.h) sp.set('h', String(params.h));
+    if (params.year) sp.set('year', params.year);
+    if (params.size) sp.set('size', String(params.size));
     return request<{ list: SearchResultItem[]; page: number; pagecount: number; total: number }>(`/api/catalog?${sp}`, { signal });
   },
 
