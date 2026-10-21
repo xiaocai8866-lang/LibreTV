@@ -57,9 +57,43 @@ interface ExtinfContext {
   extGroup: string;
 }
 
+/** TVBox 的 txt 频道列表：`分组,#genre#` 起一个分组，`频道名,地址` 为一个频道（多地址用 # 分隔） */
+const TXT_GENRE_RE = /^(.*?),\s*#genre#\s*$/i;
+const TXT_CHANNEL_RE = /^([^,#][^,]*),\s*(https?:\/\/\S+)$/i;
+
+function isTxtPlaylist(content: string): boolean {
+  if (/#EXTINF/i.test(content)) return false;
+  return /,\s*#genre#/i.test(content) || /^[^#\r\n,][^,\r\n]*,\s*https?:\/\//m.test(content);
+}
+
+function parseTxt(content: string, baseUrl?: string): LiveChannel[] {
+  const channels: LiveChannel[] = [];
+  const seen = new Set<string>();
+  let group: string | undefined;
+  for (const rawLine of content.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    const genre = line.match(TXT_GENRE_RE);
+    if (genre) {
+      group = genre[1].trim() || undefined;
+      continue;
+    }
+    const m = line.match(TXT_CHANNEL_RE);
+    if (!m) continue;
+    const name = m[1].trim();
+    for (const part of m[2].split('#')) {
+      const url = normalizeStreamUrl(part.replace(/\$.*$/, ''), baseUrl);
+      if (!url || seen.has(url)) continue;
+      seen.add(url);
+      channels.push({ id: stableId(url), name, url, group });
+    }
+  }
+  return channels;
+}
+
 export function parseM3u(content: string, baseUrl?: string): LiveChannel[] {
   const channels: LiveChannel[] = [];
   if (!content) return channels;
+  if (isTxtPlaylist(content)) return parseTxt(content, baseUrl);
 
   const seen = new Set<string>();
   let ctx: ExtinfContext | null = null;
